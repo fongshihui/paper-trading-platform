@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Trading Signal",
+  "type": "object",
+  "required": ["symbol", "side", "price", "quantity", "timestamp"],
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "description": "Instrument symbol, e.g. AAPL"
+    },
+    "side": {
+      "type": "string",
+      "enum": ["BUY", "SELL"],
+      "description": "Direction of the signal"
+    },
+    "price": {
+      "type": "number",
+      "description": "Reference price used for the signal"
+    },
+    "quantity": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Suggested quantity in units"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Signal generation time in ISO-8601 format"
+    }
+  },
+  "additionalProperties": true
+}

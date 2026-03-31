@@ -1,0 +1,22 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Market Data Tick",
+  "type": "object",
+  "required": ["symbol", "price", "timestamp"],
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "description": "Instrument symbol, e.g. AAPL"
+    },
+    "price": {
+      "type": "number",
+      "description": "Last traded price"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Event time in ISO-8601 format"
+    }
+  },
+  "additionalProperties": true
+}
