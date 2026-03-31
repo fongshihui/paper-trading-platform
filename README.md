@@ -38,26 +38,73 @@ The system is composed of several containerized and standalone services that com
 
 ### Prerequisites
 
-*   Docker and Docker Compose
-*   Python 3.10+ and `pip`
-*   Java 11+ and Maven (for building the Flink job)
-*   `git`
+#### System Requirements
+- **Operating System**: Linux, macOS, or Windows (WSL2 recommended for Windows)
+- **Memory**: 8GB RAM minimum, 16GB recommended
+- **Storage**: 10GB free disk space
+- **Network**: Internet connection for dependency downloads
+
+#### Required Software
+- **Docker and Docker Compose**: 
+  - Docker Desktop: https://www.docker.com/products/docker-desktop/
+  - Or install separately: Docker Engine + Docker Compose
+  - Verify: `docker --version` and `docker compose version`
+
+- **Python 3.10+**:
+  - Download: https://www.python.org/downloads/
+  - Verify: `python --version` or `python3 --version`
+  - Recommended: Use `pyenv` or virtual environments
+
+- **Java 11+**:
+  - OpenJDK: https://openjdk.org/install/
+  - Or Adoptium: https://adoptium.net/
+  - Verify: `java -version` and `javac -version`
+
+- **Maven**:
+  - Download: https://maven.apache.org/download.cgi
+  - Verify: `mvn --version`
+
+- **Git**:
+  - Download: https://git-scm.com/downloads
+  - Verify: `git --version`
 
 ### 1. Set Up Environment
 
-Clone the repository and install the required Python packages.
-
-```sh
+#### Clone the Repository
+```bash
 git clone https://github.com/your-username/paper-trading-platform.git
 cd paper-trading-platform
+```
+
+#### Install Python Dependencies
+```bash
+# Create and activate virtual environment (recommended)
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
+# Install required packages
 pip install -r requirements.txt
+
+# Verify installation
+pip list | grep -E "kafka|flink|streamlit"
 ```
 
-Create a local environment file from the example. You can customize the Kafka topics and simulator parameters here.
-
-```sh
+#### Configure Environment
+```bash
+# Copy environment template
 cp .env.example .env
+
+# Edit configuration (optional)
+# nano .env  # or use your preferred editor
 ```
+
+**Environment Variables Explained:**
+- `KAFKA_BOOTSTRAP_SERVERS`: Kafka connection string (default: localhost:9092)
+- `MARKET_DATA_TOPIC`: Raw price data topic name
+- `SIGNALS_TOPIC`: Trading signals topic name  
+- `SLIPPAGE_BPS`: Slippage in basis points (1 BPS = 0.01%)
+- `FEE_PER_TRADE`: Fixed commission per trade
+- `SIMULATOR_STATE_PATH`: JSON file path for dashboard state
 
 ### 2. Start Infrastructure
 
@@ -123,12 +170,148 @@ Configuration is managed via environment variables, which can be placed in a `.e
 *   `FEE_PER_TRADE`: A flat fee applied to each simulated trade.
 *   `SIMULATOR_STATE_PATH`: File path where the simulator writes its state for the dashboard to read.
 
+## Troubleshooting
+
+### Common Issues and Solutions
+
+**1. Flink Job Submission Fails**
+- **Error**: "Class not found" or dependency issues
+- **Solution**: Run `mvn clean package` from the `flink-jobs` directory to rebuild the JAR
+- **Check**: Ensure all dependencies are correctly specified in `pom.xml`
+
+**2. Kafka Connection Issues**
+- **Error**: "Connection refused" or "Broker not available"
+- **Solution**: Verify Docker containers are running: `docker compose ps`
+- **Check**: Wait 30-60 seconds after starting containers for Kafka to fully initialize
+
+**3. Python Dependency Issues**
+- **Error**: "Module not found" when running Python scripts
+- **Solution**: Run `pip install -r requirements.txt` to install all dependencies
+- **Check**: Use Python 3.10+ and ensure virtual environment is activated if used
+
+**4. Dashboard Not Updating**
+- **Error**: Streamlit dashboard shows stale data
+- **Solution**: Check that `simulator/execution.py` is running and writing to `dashboard/state.json`
+- **Check**: Verify file permissions and path configuration in `.env`
+
+**5. Performance Issues**
+- **Symptom**: High latency in signal processing
+- **Solution**: Adjust Flink parallelism in `SignalJob.java`
+- **Optimization**: Increase Kafka consumer group instances for better throughput
+
+### Debugging Tips
+
+1. **Check Kafka Topics**: Use `docker compose exec kafka kafka-topics --list --bootstrap-server localhost:9092` to verify topics exist
+2. **Monitor Messages**: Use `docker compose exec kafka kafka-console-consumer --topic market-data --from-beginning --bootstrap-server localhost:9092` to see raw messages
+3. **Flink Dashboard**: Access `http://localhost:8081` to monitor job status and performance metrics
+4. **Logs**: Check container logs with `docker compose logs -f` for real-time debugging
+
+## Performance Tuning
+
+### Flink Optimization
+- **Parallelism**: Adjust in `SignalJob.java` based on available CPU cores
+- **Checkpointing**: Configure appropriate interval for your latency requirements
+- **State Backend**: Consider RocksDB for larger state sizes
+
+### Kafka Optimization
+- **Batch Size**: Adjust producer batch.size for better throughput
+- **Linger.ms**: Tune for latency vs throughput tradeoff
+- **Compression**: Enable compression (snappy, lz4) for better network utilization
+
+### Python Optimization
+- **Async Processing**: Use asyncio for I/O-bound operations
+- **Memory Management**: Monitor memory usage with large position datasets
+- **Connection Pooling**: Reuse Kafka producer/consumer connections
+
 ## Next Steps
 
 This scaffold provides a solid foundation. Here are some ways it could be extended:
 
 *   **More Sophisticated Signals**: Implement more complex logic in the `SignalJob.java`, such as using windowed aggregations (moving averages, RSI) or joining multiple data streams.
-*   **Realistic Data**: Replace the `mock_prices_producer.py` with a producer that connects to a real-time market data feed (e.g., via WebSocket).
+*   **Real Market Data**: ✅ **IMPLEMENTED** - Use `alpaca_market_producer.py` with Alpaca API for real-time market data (see Real Market Data section below)
 *   **Advanced Simulation**: Enhance `simulator/execution.py` to model exchange-specific behavior like order book depth, latency, or partial fills.
 *   **Durable State**: Replace the JSON file state with a proper time-series database (e.g., InfluxDB, PostgreSQL) for more robust metric tracking.
 *   **Interactive Dashboard**: Add controls to the Streamlit dashboard to adjust strategy parameters or view historical performance.
+
+## Real Market Data Integration
+
+### Using Alpaca API for Real-Time Data
+
+The platform now includes `alpaca_market_producer.py` that connects to real market data sources:
+
+#### Features
+- **Real-time prices** from Alpaca API
+- **Automatic fallback** to mock data when API keys aren't configured
+- **Multiple symbols** support (stocks, ETFs, cryptocurrencies)
+- **Smart error handling** with graceful degradation
+
+#### Setup Instructions
+
+1. **Get Free API Keys**:
+   ```bash
+   # Visit https://app.alpaca.markets/signup
+   # Create a free paper trading account
+   ```
+
+2. **Configure Environment**:
+   ```bash
+   cp .env.example .env
+   # Edit .env and add:
+   ALPACA_API_KEY=your_api_key_here
+   ALPACA_API_SECRET=your_api_secret_here
+   ALPACA_BASE_URL=https://paper-api.alpaca.markets
+   ```
+
+3. **Run with Real Data**:
+   ```bash
+   python -m producers.alpaca_market_producer
+   ```
+
+#### Supported Data Sources
+
+- **Alpaca API**: Real-time stock and ETF data (primary)
+- **Fallback**: Realistic mock data with random walk algorithm
+- **Historical**: 5-minute delayed data when real-time unavailable
+
+#### Configuration Options
+
+```bash
+# Symbols to track (comma-separated)
+SYMBOLS=AAPL,MSFT,GOOG,TSLA,NVDA,SPY
+
+# Update frequency in seconds
+PRODUCER_INTERVAL_SECS=1.0
+
+# Alpaca configuration
+ALPACA_API_KEY=your_key_here
+ALPACA_API_SECRET=your_secret_here
+ALPACA_BASE_URL=https://paper-api.alpaca.markets
+```
+
+### Benefits Over Mock Data
+
+1. **Real Market Conditions**: Actual price movements and volatility
+2. **After-Hours Trading**: Support for pre-market and after-hours data
+3. **Multiple Asset Classes**: Stocks, ETFs, cryptocurrencies
+4. **Historical Context**: Access to historical price data
+5. **Market Events**: Real corporate actions and news events
+
+### Fallback Behavior
+
+The system automatically handles:
+- Missing API keys → Uses mock data
+- API rate limits → Falls back to historical data
+- Network issues → Graceful degradation to mock
+- Invalid symbols → Skips problematic symbols
+
+### Monitoring
+
+Each price message includes source information:
+```json
+{
+  "symbol": "AAPL",
+  "price": 182.63,
+  "timestamp": "2024-01-15T14:30:00.000Z",
+  "source": "alpaca_realtime"  // or "alpaca_historical", "mock"
+}
+```
