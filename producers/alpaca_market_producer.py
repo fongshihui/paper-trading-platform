@@ -55,12 +55,15 @@ def create_producer(bootstrap_servers: str) -> KafkaProducer:
     Returns:
         Configured KafkaProducer instance
     """
+    compression_type = _get_env("KAFKA_COMPRESSION_TYPE", "gzip").strip().lower()
+    compression_setting = None if compression_type in {"", "none"} else compression_type
+
     return KafkaProducer(
         bootstrap_servers=bootstrap_servers,
         value_serializer=lambda v: json.dumps(v).encode("utf-8"),
         linger_ms=5,
         batch_size=16384,
-        compression_type="lz4",
+        compression_type=compression_setting,
     )
 
 

@@ -124,10 +124,16 @@ cd flink-jobs
 mvn clean package
 cd ..
 
-# Submit the job
-flink run \
+# Copy the built JAR into the Flink JobManager container
+docker cp \
+  flink-jobs/target/flink-jobs-1.0-SNAPSHOT.jar \
+  flink-jobmanager:/tmp/flink-jobs-1.0-SNAPSHOT.jar
+
+# Submit the job from inside the container
+docker exec -it flink-jobmanager flink run \
   -d \
-  flink-jobs/target/flink-jobs-1.0-SNAPSHOT.jar
+  -c com.example.trading.SignalJob \
+  /tmp/flink-jobs-1.0-SNAPSHOT.jar
 ```
 
 You can view the running job in the Flink Dashboard at `http://localhost:8081`.
@@ -264,7 +270,7 @@ The platform now includes `alpaca_market_producer.py` that connects to real mark
 
 3. **Run with Real Data**:
    ```bash
-   python -m producers.alpaca_market_producer
+   python3 -m producers.alpaca_market_producer
    ```
 
 #### Supported Data Sources
@@ -281,6 +287,9 @@ SYMBOLS=AAPL,MSFT,GOOG,TSLA,NVDA,SPY
 
 # Update frequency in seconds
 PRODUCER_INTERVAL_SECS=1.0
+
+# Kafka compression: gzip works out of the box, use none to disable
+KAFKA_COMPRESSION_TYPE=gzip
 
 # Alpaca configuration
 ALPACA_API_KEY=your_key_here
