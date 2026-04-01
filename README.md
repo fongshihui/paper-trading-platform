@@ -114,6 +114,22 @@ This command starts Kafka, Zookeeper, and the Flink JobManager/TaskManager conta
 docker compose up -d
 ```
 
+Create the Kafka topics before submitting the Flink job. The Kafka source is configured to read the `market-data` topic immediately, and Flink fails if the topic does not exist yet.
+
+```sh
+docker compose exec kafka kafka-topics --create --if-not-exists \
+  --topic market-data \
+  --partitions 1 \
+  --replication-factor 1 \
+  --bootstrap-server localhost:9092
+
+docker compose exec kafka kafka-topics --create --if-not-exists \
+  --topic signals \
+  --partitions 1 \
+  --replication-factor 1 \
+  --bootstrap-server localhost:9092
+```
+
 ### 3. Build and Submit Flink Job
 
 Compile the Java project and submit the resulting JAR to the running Flink cluster.
@@ -137,6 +153,8 @@ docker exec -it flink-jobmanager flink run \
 ```
 
 You can view the running job in the Flink Dashboard at `http://localhost:8081`.
+
+If you re-submit the job multiple times while testing, cancel the old copies first so only one `PaperTrading-SignalJob` remains active.
 
 ### 4. Run the Python Services
 
