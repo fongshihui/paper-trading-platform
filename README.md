@@ -117,7 +117,7 @@ docker compose --profile mock up --build
 
 This starts Zookeeper, Kafka, Kafka topic initialization, Flink JobManager/TaskManager, the automated Flink job submitter, the mock price producer, the simulator, and the Streamlit dashboard.
 
-Open the dashboard at `http://localhost:8501`.
+Open the dashboard at `http://localhost:8501` and the Flink dashboard at `http://localhost:8081`.
 
 To use Alpaca market data instead of the mock producer, set your Alpaca credentials in `.env` and run:
 

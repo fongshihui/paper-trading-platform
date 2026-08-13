@@ -85,9 +85,7 @@ class Portfolio:
 
         self.max_equity = max(self.max_equity, equity)
         drawdown = (
-            (self.max_equity - equity) / self.max_equity
-            if self.max_equity > 0
-            else 0.0
+            (self.max_equity - equity) / self.max_equity if self.max_equity > 0 else 0.0
         )
 
         timestamp = datetime.utcnow().isoformat() + "Z"

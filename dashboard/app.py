@@ -45,7 +45,9 @@ def main() -> None:
     conn = get_db_connection(database_url)
     metrics = load_latest_portfolio_snapshot(conn)
     if metrics is None:
-        st.warning("No metrics found yet. Start the simulator so it can write snapshots.")
+        st.warning(
+            "No metrics found yet. Start the simulator so it can write snapshots."
+        )
         return
 
     col1, col2, col3, col4 = st.columns(4)
