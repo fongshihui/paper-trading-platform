@@ -4,12 +4,12 @@
 
 import json
 import os
-from pathlib import Path
 
 from dotenv import load_dotenv
 from kafka import KafkaConsumer
 
 from .portfolio import Portfolio
+from .storage import connect_with_retry, ensure_schema, save_portfolio_snapshot
 
 
 def _get_env(name: str, default: str) -> str:
@@ -49,7 +49,7 @@ def run_simulator() -> None:
     - Creates Kafka consumer for trading signals
     - Initializes portfolio with starting capital
     - Processes each signal with slippage and fees
-    - Updates portfolio state and writes to JSON file
+    - Updates portfolio state and writes snapshots to Postgres
     - Runs continuously until interrupted
     """
     # Load environment variables from .env file
@@ -64,20 +64,22 @@ def run_simulator() -> None:
     fee_per_trade = float(
         _get_env("FEE_PER_TRADE", "1.0")
     )  # Fixed fee per trade in dollars
-    state_path = Path(
-        _get_env("SIMULATOR_STATE_PATH", "dashboard/state.json")
-    )  # Path for state JSON file
-    state_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure directory exists
+    database_url = _get_env(
+        "DATABASE_URL", "postgresql://paper:paper@localhost:5432/paper_trading"
+    )
 
     # Initialize portfolio with default starting capital ($100,000)
     portfolio = Portfolio()
 
     # Create Kafka consumer for trading signals
     consumer = create_consumer(bootstrap_servers, topic)
+    db_conn = connect_with_retry(database_url)
+    ensure_schema(db_conn)
 
     print(
         f"Starting simulator consuming from {bootstrap_servers}, "
-        f"topic='{topic}', slippage_bps={slippage_bps}, fee_per_trade={fee_per_trade}"
+        f"topic='{topic}', slippage_bps={slippage_bps}, "
+        f"fee_per_trade={fee_per_trade}"
     )
 
     try:
@@ -115,9 +117,7 @@ def run_simulator() -> None:
             metrics = portfolio.mark_to_market({symbol: price})
             metrics["last_signal"] = signal  # Include last signal for reference
 
-            # Write updated portfolio state to JSON file for dashboard
-            with state_path.open("w") as f:
-                json.dump(metrics, f, indent=2)
+            save_portfolio_snapshot(db_conn, metrics)
 
             # Log processing results
             print(
@@ -132,6 +132,7 @@ def run_simulator() -> None:
     finally:
         # Clean up Kafka consumer
         consumer.close()
+        db_conn.close()
 
 
 if __name__ == "__main__":

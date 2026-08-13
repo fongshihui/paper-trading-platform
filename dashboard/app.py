@@ -1,41 +1,51 @@
-import json
 import os
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from dotenv import load_dotenv
 
+from simulator.storage import (
+    connect_with_retry,
+    ensure_schema,
+    load_latest_portfolio_snapshot,
+)
 
-def load_metrics(path: Path):
-    if not path.exists():
-        return None
-    try:
-        with path.open() as f:
-            return json.load(f)
-    except json.JSONDecodeError:
-        return None
+
+@st.cache_resource
+def get_db_connection(database_url: str):
+    conn = connect_with_retry(database_url)
+    ensure_schema(conn)
+    return conn
 
 
 def main() -> None:
     load_dotenv()
 
-    state_path = Path(os.getenv("DASHBOARD_STATE_PATH", "dashboard/state.json"))
+    database_url = os.getenv(
+        "DATABASE_URL", "postgresql://paper:paper@localhost:5432/paper_trading"
+    )
 
     st.set_page_config(page_title="Paper Trading Dashboard", layout="wide")
     st.title("Paper Trading Platform — Live Risk & P&L")
 
-    st.caption(f"Reading simulator metrics from `{state_path}`")
+    st.caption("Reading simulator metrics from Postgres")
 
-    # Auto-refresh every 5 seconds
-    st.autorefresh(interval=5000, key="metrics_refresh")
+    # Auto-refresh every 5 seconds. Streamlit does not provide st.autorefresh
+    # in all versions, so use a tiny browser-side fallback.
+    components.html(
+        """
+        <script>
+          setTimeout(() => window.parent.location.reload(), 5000);
+        </script>
+        """,
+        height=0,
+    )
 
-    metrics = load_metrics(state_path)
+    conn = get_db_connection(database_url)
+    metrics = load_latest_portfolio_snapshot(conn)
     if metrics is None:
-        st.warning(
-            "No metrics found yet. Start the simulator so it can write to "
-            f"`{state_path}`."
-        )
+        st.warning("No metrics found yet. Start the simulator so it can write snapshots.")
         return
 
     col1, col2, col3, col4 = st.columns(4)
