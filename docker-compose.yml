@@ -1,6 +1,14 @@
-version: "3.8"
-
 services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paper_trading
+      POSTGRES_USER: paper
+      POSTGRES_PASSWORD: paper
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
     restart: unless-stopped
@@ -27,6 +35,22 @@ services:
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - kafka
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      "
+      until kafka-topics --bootstrap-server kafka:9092 --list >/dev/null 2>&1; do
+        echo 'Waiting for Kafka...';
+        sleep 2;
+      done;
+      kafka-topics --create --if-not-exists --topic market-data --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092;
+      kafka-topics --create --if-not-exists --topic signals --partitions 3 --replication-factor 1 --bootstrap-server kafka:9092;
+      "
 
   jobmanager:
     image: flink:1.17.1-scala_2.12-java11
@@ -56,6 +80,91 @@ services:
         jobmanager.rpc.address: jobmanager
         taskmanager.numberOfTaskSlots: 2
 
+  flink-job-submitter:
+    build:
+      context: .
+      dockerfile: docker/flink-job-submitter.Dockerfile
+    restart: "no"
+    depends_on:
+      - jobmanager
+      - taskmanager
+      - kafka-init
+
+  mock-price-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["mock"]
+    restart: unless-stopped
+    depends_on:
+      - kafka-init
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MARKET_DATA_TOPIC: market-data
+      SYMBOLS: ${SYMBOLS:-AAPL,MSFT,GOOG,TSLA,NVDA,AMZN}
+      PRODUCER_INTERVAL_SECS: ${PRODUCER_INTERVAL_SECS:-1.0}
+      KAFKA_COMPRESSION_TYPE: ${KAFKA_COMPRESSION_TYPE:-gzip}
+    command: ["python", "-m", "producers.mock_prices_producer"]
+
+  alpaca-market-producer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["alpaca"]
+    restart: unless-stopped
+    depends_on:
+      - kafka-init
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      MARKET_DATA_TOPIC: market-data
+      SYMBOLS: ${SYMBOLS:-AAPL,MSFT,GOOG,TSLA,NVDA,AMZN}
+      PRODUCER_INTERVAL_SECS: ${PRODUCER_INTERVAL_SECS:-1.0}
+      KAFKA_COMPRESSION_TYPE: ${KAFKA_COMPRESSION_TYPE:-gzip}
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+    command: ["python", "-m", "producers.alpaca_market_producer"]
+
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - kafka-init
+      - flink-job-submitter
+      - postgres
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      SIGNALS_TOPIC: signals
+      SLIPPAGE_BPS: ${SLIPPAGE_BPS:-5}
+      FEE_PER_TRADE: ${FEE_PER_TRADE:-1.0}
+      DATABASE_URL: postgresql://paper:paper@postgres:5432/paper_trading
+    command: ["python", "-m", "simulator.execution"]
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - simulator
+    ports:
+      - "8501:8501"
+    environment:
+      DATABASE_URL: postgresql://paper:paper@postgres:5432/paper_trading
+    command:
+      [
+        "streamlit",
+        "run",
+        "dashboard/app.py",
+        "--server.address=0.0.0.0",
+        "--server.port=8501"
+      ]
+
 networks:
   default:
     name: paper-trading-net
+
+volumes:
+  postgres-data:
