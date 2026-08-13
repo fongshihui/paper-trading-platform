@@ -19,12 +19,11 @@ Usage:
 
 import json
 import os
-import time
 import random
+import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Generator
+from typing import Dict, List, Optional
 
-import pandas as pd
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 
@@ -32,7 +31,6 @@ from kafka import KafkaProducer
 try:
     import alpaca_trade_api as tradeapi
     from alpaca_trade_api.rest import REST
-    from alpaca_trade_api.stream import Stream
 
     ALPACA_AVAILABLE = True
 except ImportError:
