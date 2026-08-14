@@ -17,6 +17,10 @@ def _get_env(name: str, default: str) -> str:
     return value if value is not None else default
 
 
+def _str_to_bool(value: str) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def create_consumer(bootstrap_servers: str, topic: str) -> KafkaConsumer:
     """
     Create and configure a Kafka consumer for trading signals.
@@ -31,12 +35,10 @@ def create_consumer(bootstrap_servers: str, topic: str) -> KafkaConsumer:
     return KafkaConsumer(
         topic,
         bootstrap_servers=bootstrap_servers,
-        group_id="paper-trading-simulator",  # Consumer group ID
-        auto_offset_reset="latest",  # Start from latest messages
-        enable_auto_commit=True,  # Automatically commit offsets
-        value_deserializer=lambda v: json.loads(
-            v.decode("utf-8")
-        ),  # Deserialize JSON messages
+        group_id="paper-trading-simulator",
+        auto_offset_reset="latest",
+        enable_auto_commit=True,
+        value_deserializer=lambda v: json.loads(v.decode("utf-8")),
     )
 
 
@@ -52,26 +54,30 @@ def run_simulator() -> None:
     - Updates portfolio state and writes snapshots to Postgres
     - Runs continuously until interrupted
     """
-    # Load environment variables from .env file
     load_dotenv()
 
-    # Get configuration from environment variables with defaults
     bootstrap_servers = _get_env("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
     topic = _get_env("SIGNALS_TOPIC", "signals")
-    slippage_bps = float(
-        _get_env("SLIPPAGE_BPS", "5")
-    )  # Slippage in basis points (5 bps = 0.05%)
-    fee_per_trade = float(
-        _get_env("FEE_PER_TRADE", "1.0")
-    )  # Fixed fee per trade in dollars
-    database_url = _get_env(
-        "DATABASE_URL", "postgresql://paper:paper@localhost:5432/paper_trading"
+    slippage_bps = float(_get_env("SLIPPAGE_BPS", "5"))
+    fee_per_trade = float(_get_env("FEE_PER_TRADE", "1.0"))
+    database_url = _get_env("DATABASE_URL", "postgresql://localhost:5432/paper_trading")
+    starting_cash = float(_get_env("STARTING_CASH", "100000.0"))
+    max_position = float(_get_env("MAX_POSITION_VALUE_PER_SYMBOL", "25000.0"))
+    max_total_position = float(_get_env("MAX_TOTAL_POSITION_VALUE", "100000.0"))
+    max_drawdown = float(_get_env("MAX_DRAWDOWN_LIMIT", "0.20"))
+    daily_loss_limit = float(_get_env("DAILY_LOSS_LIMIT", "0.05"))
+    kill_switch = _str_to_bool(_get_env("TRADING_KILL_SWITCH", "false"))
+
+    portfolio = Portfolio(
+        cash=starting_cash,
+        max_position_value_per_symbol=max_position,
+        max_total_position_value=max_total_position,
+        max_drawdown_limit=max_drawdown,
+        daily_loss_limit=daily_loss_limit,
+        kill_switch=kill_switch,
+        daily_start_equity=starting_cash,
     )
 
-    # Initialize portfolio with default starting capital ($100,000)
-    portfolio = Portfolio()
-
-    # Create Kafka consumer for trading signals
     consumer = create_consumer(bootstrap_servers, topic)
     db_conn = connect_with_retry(database_url)
     ensure_schema(db_conn)
@@ -79,58 +85,61 @@ def run_simulator() -> None:
     print(
         f"Starting simulator consuming from {bootstrap_servers}, "
         f"topic='{topic}', slippage_bps={slippage_bps}, "
-        f"fee_per_trade={fee_per_trade}"
+        f"fee_per_trade={fee_per_trade}, risk_limits={portfolio.max_position_value_per_symbol}/{portfolio.max_total_position_value}/{portfolio.max_drawdown_limit}"
     )
 
     try:
-        # Main processing loop: consume messages from Kafka indefinitely
         for message in consumer:
-            # Parse incoming trading signal from Kafka message
             signal = message.value
-            symbol = signal.get("symbol")  # Stock symbol (e.g., "AAPL")
-            side = signal.get("side")  # Trade side: "BUY" or "SELL"
-            price = float(signal.get("price", 0) or 0)  # Signal price
-            quantity = int(signal.get("quantity", 0) or 0)  # Signal quantity
+            if not isinstance(signal, dict):
+                continue
 
-            # Validate signal - skip if invalid
+            if "kill_switch" in signal:
+                portfolio.set_kill_switch(bool(signal["kill_switch"]))
+                print(f"Kill switch set to {portfolio.kill_switch}")
+                continue
+
+            symbol = signal.get("symbol")
+            side = signal.get("side")
+            price = float(signal.get("price", 0) or 0)
+            quantity = int(signal.get("quantity", 0) or 0)
+
             if not symbol or side not in {"BUY", "SELL"}:
-                continue  # Skip invalid signals
+                continue
             if price <= 0 or quantity <= 0:
-                continue  # Skip signals with invalid price/quantity
+                continue
 
-            # Calculate execution details with slippage
-            direction = 1 if side == "BUY" else -1  # 1 for buy, -1 for sell
-            fill_price = price * (
-                1 + direction * slippage_bps / 10_000.0
-            )  # Apply slippage
-            signed_qty = (
-                direction * quantity
-            )  # Signed quantity (positive for buy, negative for sell)
+            direction = 1 if side == "BUY" else -1
+            fill_price = price * (1 + direction * slippage_bps / 10_000.0)
+            signed_qty = direction * quantity
 
-            # Update portfolio with executed trade
-            portfolio.update_cash(
-                signed_qty, fill_price, fee_per_trade
-            )  # Update cash balance
-            portfolio.update_position(symbol, signed_qty, fill_price)  # Update position
+            accepted = portfolio.execute_trade(
+                symbol,
+                signed_qty,
+                fill_price,
+                fees=fee_per_trade,
+                prices={symbol: price},
+            )
+            if not accepted:
+                print(
+                    f"Rejected trade for {symbol}: {portfolio.last_risk_rejection} "
+                    f"(signal={signal})"
+                )
+                continue
 
-            # Calculate portfolio metrics with current market prices
             metrics = portfolio.mark_to_market({symbol: price})
-            metrics["last_signal"] = signal  # Include last signal for reference
-
+            metrics["last_signal"] = signal
             save_portfolio_snapshot(db_conn, metrics)
 
-            # Log processing results
             print(
                 f"processed signal: {signal}, "
                 f"equity={metrics['equity']:.2f}, cash={metrics['cash']:.2f}"
             )
 
     except KeyboardInterrupt:
-        # Graceful shutdown on Ctrl+C
         print("Stopping simulator...")
 
     finally:
-        # Clean up Kafka consumer
         consumer.close()
         db_conn.close()
 
