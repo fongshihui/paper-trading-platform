@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from kafka import KafkaProducer
+from kafka.errors import NoBrokersAvailable
 
 # Try to import Alpaca SDK, fall back to mock if not available
 try:
@@ -63,6 +64,40 @@ def create_producer(bootstrap_servers: str) -> KafkaProducer:
         batch_size=16384,
         compression_type=compression_setting,
     )
+
+
+def create_producer_with_retry(bootstrap_servers: str) -> KafkaProducer:
+    """
+    Create Kafka producer with bounded retries to handle startup race conditions.
+
+    Environment variables:
+      - KAFKA_CONNECT_MAX_RETRIES (default: 30)
+      - KAFKA_CONNECT_RETRY_DELAY_SECS (default: 2.0)
+    """
+    max_retries = int(_get_env("KAFKA_CONNECT_MAX_RETRIES", "30"))
+    retry_delay_secs = float(_get_env("KAFKA_CONNECT_RETRY_DELAY_SECS", "2.0"))
+    last_error: Optional[Exception] = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            producer = create_producer(bootstrap_servers)
+            print(
+                f"Connected to Kafka at {bootstrap_servers} "
+                f"(attempt {attempt}/{max_retries})"
+            )
+            return producer
+        except NoBrokersAvailable as exc:
+            last_error = exc
+            print(
+                f"Kafka broker not ready at {bootstrap_servers} "
+                f"(attempt {attempt}/{max_retries}). Retrying in {retry_delay_secs}s..."
+            )
+            time.sleep(retry_delay_secs)
+
+    raise RuntimeError(
+        f"Unable to connect to Kafka broker(s) at {bootstrap_servers} after "
+        f"{max_retries} attempts"
+    ) from last_error
 
 
 def initialize_alpaca_client() -> Optional[REST]:
@@ -214,7 +249,7 @@ def main() -> None:
     if not symbols:
         raise SystemExit("No symbols configured; set SYMBOLS env var.")
 
-    producer = create_producer(bootstrap_servers)
+    producer = create_producer_with_retry(bootstrap_servers)
     alpaca_client = initialize_alpaca_client()
 
     if alpaca_client:
