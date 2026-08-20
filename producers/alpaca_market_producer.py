@@ -17,26 +17,37 @@ Usage:
     python -m producers.alpaca_market_producer
 """
 
+import asyncio
 import json
 import os
+import queue
 import random
+import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from kafka import KafkaProducer
 from kafka.errors import NoBrokersAvailable
 
-# Try to import Alpaca SDK, fall back to mock if not available
+# Try to import modern Alpaca SDK first, then legacy SDK as fallback.
 try:
-    import alpaca_trade_api as tradeapi
-    from alpaca_trade_api.rest import REST
+    from alpaca.data.live import StockDataStream
 
+    ALPACA_PY_AVAILABLE = True
     ALPACA_AVAILABLE = True
 except ImportError:
-    ALPACA_AVAILABLE = False
-    print("Warning: alpaca-trade-api not installed. Falling back to mock data.")
+    ALPACA_PY_AVAILABLE = False
+    try:
+        import alpaca_trade_api as tradeapi
+        from alpaca_trade_api.rest import REST
+
+        ALPACA_AVAILABLE = True
+    except ImportError:
+        ALPACA_AVAILABLE = False
+        print("Warning: no supported Alpaca SDK found. Falling back to mock data.")
+        REST = None
 
 
 def _get_env(name: str, default: str) -> str:
@@ -100,18 +111,31 @@ def create_producer_with_retry(bootstrap_servers: str) -> KafkaProducer:
     ) from last_error
 
 
-def initialize_alpaca_client() -> Optional[REST]:
-    """
-    Initialize Alpaca REST client with environment variables.
+def initialize_alpaca_client():
+    """Initialize Alpaca client config for either alpaca-py or legacy SDK."""
+    if ALPACA_PY_AVAILABLE:
+        api_key = os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_KEY_ID")
+        api_secret = os.getenv("ALPACA_API_SECRET") or os.getenv("ALPACA_SECRET_KEY")
+        base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+        data_url = os.getenv("ALPACA_DATA_URL", "https://data.alpaca.markets")
 
-    Returns:
-        Initialized Alpaca REST client or None if unavailable/unconfigured
-    """
+        if not api_key or not api_secret:
+            print("Warning: Alpaca credentials not set. Using mock data.")
+            return None
+
+        return {
+            "api_key": api_key,
+            "secret_key": api_secret,
+            "base_url": base_url,
+            "data_url": data_url,
+            "feed": os.getenv("ALPACA_DATA_FEED", "iex"),
+        }
+
     if not ALPACA_AVAILABLE:
         return None
 
-    api_key = os.getenv("ALPACA_API_KEY")
-    api_secret = os.getenv("ALPACA_API_SECRET")
+    api_key = os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_KEY_ID")
+    api_secret = os.getenv("ALPACA_API_SECRET") or os.getenv("ALPACA_SECRET_KEY")
     base_url = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
 
     if not api_key or not api_secret:
@@ -125,7 +149,7 @@ def initialize_alpaca_client() -> Optional[REST]:
         return None
 
 
-def get_real_time_prices(api: REST, symbols: List[str]) -> Dict[str, float]:
+def get_real_time_prices(api: object, symbols: List[str]) -> Dict[str, float]:
     """Get real-time prices from Alpaca API."""
     if not api:
         return {}
@@ -138,7 +162,7 @@ def get_real_time_prices(api: REST, symbols: List[str]) -> Dict[str, float]:
         return {}
 
 
-def get_historical_prices(api: REST, symbols: List[str]) -> Dict[str, float]:
+def get_historical_prices(api: object, symbols: List[str]) -> Dict[str, float]:
     """Get historical prices (fallback if real-time not available)."""
     if not api:
         return {}
@@ -185,8 +209,121 @@ def mock_price_stream(symbols: List[str], base_price: float = 100.0):
             }
 
 
-def alpaca_price_stream(api: REST, symbols: List[str]):
-    """Real-time price stream from Alpaca API."""
+def alpaca_price_stream(api, symbols: List[str]):
+    """Use the modern alpaca-py websocket when available; otherwise fall back to legacy polling."""
+    if ALPACA_PY_AVAILABLE and isinstance(api, dict):
+        stream_queue = queue.Queue()
+        api_key = api["api_key"]
+        api_secret = api["secret_key"]
+        feed = api.get("feed", "iex")
+
+        # Convert feed string to the alpaca-py Feed enum when necessary
+        try:
+            from alpaca.data.enums import DataFeed
+
+            if isinstance(feed, str):
+                feed_enum = getattr(DataFeed, feed.upper(), None)
+            else:
+                feed_enum = feed
+            if feed_enum is None:
+                # default to IEX if unknown
+                feed_enum = DataFeed.IEX
+        except Exception:
+            feed_enum = feed
+
+        print(f"DEBUG: creating StockDataStream with feed={feed!r}, feed_enum={feed_enum!r}, type={type(feed_enum)}")
+        stream = StockDataStream(api_key, api_secret, feed=feed_enum)
+
+        async def _on_trade(trade):
+            symbol = getattr(trade, "symbol", None)
+            if not symbol or symbol not in symbols:
+                return
+            price = getattr(trade, "price", None)
+            if price is None:
+                return
+            ts = getattr(trade, "timestamp", datetime.now(timezone.utc))
+            if hasattr(ts, "isoformat"):
+                ts_str = ts.isoformat().replace("+00:00", "Z")
+            else:
+                ts_str = datetime.fromtimestamp(float(ts), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+            stream_queue.put({
+                "symbol": symbol,
+                "price": round(float(price), 4),
+                "timestamp": ts_str,
+                "source": "alpaca_realtime",
+            })
+
+        def _runner():
+            try:
+                stream.subscribe_trades(_on_trade, *symbols)
+                stream.run()
+            except Exception as exc:
+                print(f"Alpaca websocket error: {exc}")
+
+        worker = threading.Thread(target=_runner, daemon=True)
+        worker.start()
+
+        while True:
+            try:
+                yield stream_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
+
+    try:
+        from alpaca_trade_api.stream import DataStream
+    except ImportError:
+        print("Warning: Alpaca WebSocket stream unavailable; falling back to REST polling.")
+        yield from alpaca_price_stream_polling(api, symbols)
+        return
+
+    stream_queue = queue.Queue()
+    data_stream_url = os.getenv("ALPACA_DATA_STREAM_URL", "https://data.alpaca.markets")
+
+    ds = DataStream(
+        os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_KEY_ID"),
+        os.getenv("ALPACA_API_SECRET") or os.getenv("ALPACA_SECRET_KEY"),
+        data_stream_url,
+        raw_data=False,
+        feed=os.getenv("ALPACA_DATA_FEED", "iex"),
+    )
+
+    async def _on_trade(trade):
+        symbol = getattr(trade, "S", None)
+        if not symbol or symbol not in symbols:
+            return
+        price = float(getattr(trade, "p", 0) or 0)
+        if price <= 0:
+            return
+        t_ns = getattr(trade, "t", None)
+        if t_ns is None:
+            ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        else:
+            ts = datetime.fromtimestamp(int(t_ns) / 1e9, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        stream_queue.put({
+            "symbol": symbol,
+            "price": round(price, 4),
+            "timestamp": ts,
+            "source": "alpaca_realtime",
+        })
+
+    ds.subscribe_trades(_on_trade, *symbols)
+
+    def _runner():
+        asyncio.run(ds._run_forever())
+
+    worker = threading.Thread(target=_runner, daemon=True)
+    worker.start()
+
+    while True:
+        try:
+            tick = stream_queue.get(timeout=1.0)
+            yield tick
+        except queue.Empty:
+            continue
+
+
+def alpaca_price_stream_polling(api: object, symbols: List[str]):
+    """Legacy polling fallback used when websocket stream is unavailable."""
     last_prices = {}
 
     while True:
@@ -259,21 +396,29 @@ def main() -> None:
         print(f"Using mock data (Alpaca not available): {symbols}")
         price_generator = mock_price_stream(symbols)
 
+    print(f"DEBUG: Alpaca client initialized? {alpaca_client is not None}")
+
     print(f"Starting market data producer to {bootstrap_servers}, topic='{topic}'")
+    print(f"Producer config: symbols={symbols}, interval_seconds={interval_seconds}, bootstrap_servers={bootstrap_servers}")
 
     try:
+        tick_count = 0
         for tick in price_generator:
+            tick_count += 1
+            print(f"DEBUG tick[{tick_count}] before send: {tick}")
             producer.send(topic, value=tick)
+            print(f"DEBUG tick[{tick_count}] sent to Kafka topic={topic}")
 
             if hash(tick["symbol"]) % 10 == 0:
                 print(f"Sent: {tick['symbol']} ${tick['price']} ({tick['source']})")
 
             time.sleep(interval_seconds)
-
     except KeyboardInterrupt:
         print("\nShutting down market data producer...")
     except Exception as e:
-        print(f"Unexpected error: {e}")
+        import traceback
+        print("Unexpected error:")
+        traceback.print_exc()
     finally:
         producer.close()
 

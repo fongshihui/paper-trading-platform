@@ -139,6 +139,11 @@ services:
       SIGNALS_TOPIC: signals
       SLIPPAGE_BPS: ${SLIPPAGE_BPS:-5}
       FEE_PER_TRADE: ${FEE_PER_TRADE:-1.0}
+      ALPACA_API_KEY: ${ALPACA_API_KEY:-}
+      ALPACA_API_SECRET: ${ALPACA_API_SECRET:-}
+      ALPACA_BASE_URL: ${ALPACA_BASE_URL:-https://paper-api.alpaca.markets}
+      ALPACA_ENABLE_ORDERS: ${ALPACA_ENABLE_ORDERS:-false}
+      ALPACA_POLL_INTERVAL_SECS: ${ALPACA_POLL_INTERVAL_SECS:-5.0}
       DATABASE_URL: postgresql://paper:paper@postgres:5432/paper_trading
     command: ["python", "-m", "simulator.execution"]
 
@@ -161,6 +166,19 @@ services:
         "--server.address=0.0.0.0",
         "--server.port=8501"
       ]
+
+  kafdrop:
+    image: obsidiandynamics/kafdrop:latest
+    restart: unless-stopped
+    depends_on:
+      - kafka
+    ports:
+      - "9000:9000"
+    environment:
+      KAFKA_BROKERCONNECT: kafka:9092
+      JVM_OPTS: "-Xms32M -Xmx64M"
+    networks:
+      - default
 
 networks:
   default:
